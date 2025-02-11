@@ -18,15 +18,6 @@ struct ServerConfig {
     quarantine: tokio::sync::RwLock<Vec<String>>,
 }
 
-impl Clone for ServerConfig {
-    fn clone(&self) -> Self {
-        Self {
-            servers: self.servers.clone(),
-            quarantine: tokio::sync::RwLock::new(self.quarantine.blocking_read().clone()),
-        }
-    }
-}
-
 impl ServerConfig {
     fn new(server_urls: Vec<String>) -> Self {
         let servers = server_urls
@@ -74,7 +65,7 @@ async fn load_balance_handler(
                 .body(body)
                 .header("Content-Type", "application/json")
                 .send()
-        })
+            })
         .collect();
 
     let (tx, rx) = tokio::sync::oneshot::channel::<(u16, String)>();
@@ -159,6 +150,9 @@ async fn load_balance_handler(
             }
             request_futures = rest.into_iter().collect();
         }
+        if let Some(sender) = sender.take() {
+            sender.send((500, "No servers available".to_string())).unwrap();
+        }
     });
 
     let (status, body) = rx.await.unwrap();
@@ -174,16 +168,23 @@ async fn load_balance_handler(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let server_config = Arc::new(ServerConfig::new(vec![
-        // Add servers
-    ]));
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.len() < 2 {
+        eprintln!("Usage: cargo run -- <PORT> <URL1> <URL2> ...");
+        std::process::exit(1);
+    }
+
+    let port = &args[0];
+    let server_urls = args[1..].to_vec();
+    let server_config = Arc::new(ServerConfig::new(server_urls));
 
     let app = Router::new()
         .route("/", post(load_balance_handler))
         .with_state(server_config);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:33333").await?;
-    println!("Load balancer listening on http://0.0.0.0:33333");
+    let address = format!("0.0.0.0:{}", port);
+    let listener = tokio::net::TcpListener::bind(&address).await?;
+    println!("Load balancer listening on http://{}", address);
 
     axum::serve(listener, app).await.map_err(|e| e.into())
 }
